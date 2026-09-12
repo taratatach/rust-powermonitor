@@ -1,0 +1,25 @@
+[package]
+name = "powermonitor"
+version = "0.1.0"
+edition = "2024"
+description = "System power events (suspend/resume, AC/battery, lock/unlock) and idle queries — inspired by Electron's powerMonitor"
+license = "LGPL-3.0-only"
+keywords = ["power", "battery", "suspend", "idle", "tauri"]
+categories = ["os", "api-bindings"]
+
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+futures = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+] }
