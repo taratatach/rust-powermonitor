@@ -4,21 +4,25 @@ use crate::{Error, PowerEvent};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
 #[cfg(target_os = "macos")]
 use macos as backend;
+#[cfg(target_os = "windows")]
+use windows as backend;
 #[cfg(target_os = "linux")]
 use linux as backend;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod backend {} // stub for unsupported platforms
 
 pub fn listen(cb: Box<dyn Fn(PowerEvent) + Send>) -> Result<(), Error> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return backend::listen(cb);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = cb;
         Err(Error("unsupported platform".into()))
@@ -26,18 +30,18 @@ pub fn listen(cb: Box<dyn Fn(PowerEvent) + Send>) -> Result<(), Error> {
 }
 
 pub fn is_on_battery_power() -> bool {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return backend::is_on_battery_power();
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false // ponytail: without a backend, assume AC power
     }
 }
 
 pub fn system_idle_time() -> u64 {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return backend::system_idle_time();
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         0
     }
