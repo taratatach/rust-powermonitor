@@ -29,3 +29,9 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
 ] }
+
+# Runs on the main thread: distributed notifications need its run loop.
+[[test]]
+name = "macos_lock"
+path = "tests/macos_lock.rs"
+harness = false

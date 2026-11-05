@@ -27,6 +27,21 @@ pub fn listen(_opts: Options, cb: Callback) -> Result<(), Error> {
 const K_IO_MESSAGE_SYSTEM_WILL_SLEEP: u32 = 0x0280_0000;
 const K_IO_MESSAGE_SYSTEM_HAS_POWERED_ON: u32 = 0x0280_0300;
 
+/// Maps an IOKit system power message to the event to dispatch and to
+/// whether the message must be acknowledged with `IOAllowPowerChange`.
+///
+/// TDD red phase: this mirrors the current `system_power_callback`
+/// behaviour (wrong constants, `CanSystemSleep` not acknowledged) so that
+/// the unit tests below compile and fail; the callback does not use it yet.
+#[cfg_attr(not(test), allow(dead_code))]
+fn map_io_message(message_type: u32) -> (Option<PowerEvent>, bool) {
+    match message_type {
+        K_IO_MESSAGE_SYSTEM_WILL_SLEEP => (Some(PowerEvent::Suspend), true),
+        K_IO_MESSAGE_SYSTEM_HAS_POWERED_ON => (Some(PowerEvent::Resume), false),
+        _ => (None, false),
+    }
+}
+
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 type CFTypeRef = *mut c_void;
@@ -215,4 +230,62 @@ pub fn system_idle_time() -> Option<u64> {
     // kCGEventSourceStateCombinedSessionState = 1, kCGAnyInputEventType = ~0
     let secs = unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) };
     if secs >= 0.0 { Some(secs as u64) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Values from IOKit/IOMessage.h: iokit_common_msg(m) is
+    // sys_iokit | sub_iokit_common | m, with sys_iokit = err_system(0x38)
+    // = 0xE000_0000 and sub_iokit_common = 0.
+    const APPLE_CAN_SYSTEM_SLEEP: u32 = 0xE000_0270;
+    const APPLE_SYSTEM_WILL_SLEEP: u32 = 0xE000_0280;
+    const APPLE_SYSTEM_WILL_NOT_SLEEP: u32 = 0xE000_0290;
+    const APPLE_SYSTEM_HAS_POWERED_ON: u32 = 0xE000_0300;
+    const APPLE_SYSTEM_WILL_POWER_ON: u32 = 0xE000_0320;
+
+    #[test]
+    fn io_message_constants_match_iokit_headers() {
+        assert_eq!(K_IO_MESSAGE_SYSTEM_WILL_SLEEP, APPLE_SYSTEM_WILL_SLEEP);
+        assert_eq!(
+            K_IO_MESSAGE_SYSTEM_HAS_POWERED_ON,
+            APPLE_SYSTEM_HAS_POWERED_ON
+        );
+    }
+
+    #[test]
+    fn can_system_sleep_is_acknowledged_without_event() {
+        assert_eq!(map_io_message(APPLE_CAN_SYSTEM_SLEEP), (None, true));
+    }
+
+    #[test]
+    fn system_will_sleep_dispatches_suspend_and_is_acknowledged() {
+        assert_eq!(
+            map_io_message(APPLE_SYSTEM_WILL_SLEEP),
+            (Some(PowerEvent::Suspend), true)
+        );
+    }
+
+    #[test]
+    fn system_will_not_sleep_is_ignored() {
+        assert_eq!(map_io_message(APPLE_SYSTEM_WILL_NOT_SLEEP), (None, false));
+    }
+
+    #[test]
+    fn system_has_powered_on_dispatches_resume() {
+        assert_eq!(
+            map_io_message(APPLE_SYSTEM_HAS_POWERED_ON),
+            (Some(PowerEvent::Resume), false)
+        );
+    }
+
+    #[test]
+    fn unknown_messages_are_ignored() {
+        // A real but unhandled IOKit message, zero, and the former (wrong)
+        // encodings of SystemWillSleep / SystemHasPoweredOn.
+        for msg in [APPLE_SYSTEM_WILL_POWER_ON, 0, 0x0280_0000, 0x0280_0300] {
+            assert_eq!(map_io_message(msg), (None, false), "message {msg:#010x}");
+        }
+    }
 }

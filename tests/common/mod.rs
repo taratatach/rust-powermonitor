@@ -11,6 +11,7 @@
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::net::UnixStream;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -278,6 +279,50 @@ impl EventLog {
                 Err(_) => return false,
             }
         }
+    }
+
+    /// Discards the events recorded so far, so that a step only sees the
+    /// events it triggers.
+    pub fn drain(&self) -> Vec<PowerEvent> {
+        self.rx.try_iter().collect()
+    }
+}
+
+/// How long a scenario waits for each expected event or mock call.
+pub const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs the steps of a scenario one after the other in the single test of
+/// a binary, and reports every failed step instead of stopping at the
+/// first one.
+///
+/// Steps share the process-global backend, so they run in order; each one
+/// must bound its waits so that a failure does not hang the next ones.
+#[derive(Default)]
+pub struct Steps {
+    failed: Vec<&'static str>,
+}
+
+impl Steps {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `step`, catching its panic (failed assertion) and logging the
+    /// outcome on stderr.
+    pub fn run(&mut self, name: &'static str, step: impl FnOnce()) {
+        eprintln!("step {name}: running");
+        match catch_unwind(AssertUnwindSafe(step)) {
+            Ok(()) => eprintln!("step {name}: ok"),
+            Err(_) => {
+                eprintln!("step {name}: FAILED");
+                self.failed.push(name);
+            }
+        }
+    }
+
+    /// Fails the test if any step failed.
+    pub fn finish(self) {
+        assert!(self.failed.is_empty(), "failed steps: {:?}", self.failed);
     }
 }
 

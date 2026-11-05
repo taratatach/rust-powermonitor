@@ -32,6 +32,37 @@ use crate::{Error, Options, PowerEvent};
 static STARTED: AtomicBool = AtomicBool::new(false);
 static ON_BATTERY: AtomicBool = AtomicBool::new(false);
 
+/// Maps a `WM_POWERBROADCAST` event (its `wparam`) to a [`PowerEvent`].
+///
+/// - `suspended` is set by `PBT_APMSUSPEND` and cleared by the first resume
+///   message, so that a wake reported by both `PBT_APMRESUMEAUTOMATIC` and
+///   `PBT_APMRESUMESUSPEND` emits a single `Resume`;
+/// - `on_battery` holds the last known power source, and `on_battery_now`
+///   reads the current one (only called for `PBT_APMPOWERSTATUSCHANGE`).
+// TDD red: current behaviour of `wnd_proc`, not wired into it yet.
+#[cfg_attr(not(test), allow(dead_code))]
+fn map_power_broadcast(
+    wparam: u32,
+    suspended: &AtomicBool,
+    on_battery: &AtomicBool,
+    on_battery_now: impl FnOnce() -> bool,
+) -> Option<PowerEvent> {
+    let _ = suspended;
+    match wparam {
+        PBT_APMSUSPEND => Some(PowerEvent::Suspend),
+        PBT_APMRESUMESUSPEND => Some(PowerEvent::Resume),
+        PBT_APMPOWERSTATUSCHANGE => {
+            let now = on_battery_now();
+            (now != on_battery.swap(now, Ordering::SeqCst)).then_some(if now {
+                PowerEvent::OnBattery
+            } else {
+                PowerEvent::OnAc
+            })
+        }
+        _ => None,
+    }
+}
+
 /// `opts` has no effect on Windows.
 pub fn listen(_opts: Options, cb: Callback) -> Result<(), Error> {
     register(cb);
@@ -140,5 +171,79 @@ pub fn system_idle_time() -> Option<u64> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::PBT_APMRESUMEAUTOMATIC;
+
+    /// Power source reader for messages that must not read it.
+    fn no_power_read() -> bool {
+        panic!("only PBT_APMPOWERSTATUSCHANGE may read the power source")
+    }
+
+    #[test]
+    fn power_broadcast_suspend_emits_suspend() {
+        let suspended = AtomicBool::new(false);
+        let on_battery = AtomicBool::new(false);
+        assert_eq!(
+            map_power_broadcast(PBT_APMSUSPEND, &suspended, &on_battery, no_power_read),
+            Some(PowerEvent::Suspend)
+        );
+    }
+
+    #[test]
+    fn power_broadcast_resume_automatic_alone_emits_resume() {
+        // Wake from a timer or wake-on-LAN without user input: Windows only
+        // sends PBT_APMRESUMEAUTOMATIC.
+        let suspended = AtomicBool::new(false);
+        let on_battery = AtomicBool::new(false);
+        map_power_broadcast(PBT_APMSUSPEND, &suspended, &on_battery, no_power_read);
+        assert_eq!(
+            map_power_broadcast(
+                PBT_APMRESUMEAUTOMATIC,
+                &suspended,
+                &on_battery,
+                no_power_read
+            ),
+            Some(PowerEvent::Resume)
+        );
+    }
+
+    #[test]
+    fn power_broadcast_resume_automatic_then_resume_suspend_emits_one_resume() {
+        // Wake by the user: PBT_APMRESUMEAUTOMATIC, then PBT_APMRESUMESUSPEND.
+        // Resume is emitted once, on the first of them.
+        let suspended = AtomicBool::new(false);
+        let on_battery = AtomicBool::new(false);
+        let map = |wparam| map_power_broadcast(wparam, &suspended, &on_battery, no_power_read);
+
+        assert_eq!(map(PBT_APMSUSPEND), Some(PowerEvent::Suspend));
+        assert_eq!(map(PBT_APMRESUMEAUTOMATIC), Some(PowerEvent::Resume));
+        assert_eq!(map(PBT_APMRESUMESUSPEND), None);
+
+        // The next suspend arms the resume again.
+        assert_eq!(map(PBT_APMSUSPEND), Some(PowerEvent::Suspend));
+        assert_eq!(map(PBT_APMRESUMEAUTOMATIC), Some(PowerEvent::Resume));
+        assert_eq!(map(PBT_APMRESUMESUSPEND), None);
+    }
+
+    #[test]
+    fn power_broadcast_power_status_change_emits_on_source_change_only() {
+        let suspended = AtomicBool::new(false);
+        let on_battery = AtomicBool::new(false);
+        let map = |now: bool| {
+            map_power_broadcast(PBT_APMPOWERSTATUSCHANGE, &suspended, &on_battery, || now)
+        };
+
+        assert_eq!(map(true), Some(PowerEvent::OnBattery));
+        assert!(on_battery.load(Ordering::SeqCst));
+        // Same source (e.g. a battery level change): no event.
+        assert_eq!(map(true), None);
+        assert_eq!(map(false), Some(PowerEvent::OnAc));
+        assert_eq!(map(false), None);
+        assert!(!on_battery.load(Ordering::SeqCst));
     }
 }
