@@ -12,20 +12,15 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 
-use crate::platform::{dispatch, Callbacks};
-use crate::{Error, PowerEvent};
+use crate::platform::{Callback, Ready, dispatch, register, start_once};
+use crate::{Error, Options, PowerEvent};
 
-static CALLBACKS: Callbacks = std::sync::Mutex::new(Vec::new());
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-pub fn listen(cb: Box<dyn Fn(PowerEvent) + Send>) -> Result<(), Error> {
-    CALLBACKS.lock().unwrap().push(cb);
-    if !STARTED.swap(true, Ordering::SeqCst) {
-        thread::spawn(run_listener);
-    }
-    Ok(())
+pub fn listen(_opts: Options, cb: Callback) -> Result<(), Error> {
+    register(cb);
+    start_once(&STARTED, run_listener)
 }
 
 /// IOMessage codes pertinents (voir IOKit/IOMessage.h).
@@ -107,11 +102,11 @@ extern "C" fn system_power_callback(refcon: *mut c_void, _service: u32, message_
     let ctx = unsafe { &*(refcon as *const Ctx) };
     match message_type {
         K_IO_MESSAGE_SYSTEM_WILL_SLEEP => {
-            dispatch(PowerEvent::Suspend, &CALLBACKS);
+            dispatch(PowerEvent::Suspend);
             // Required: without this, sleep blocks indefinitely.
             unsafe { IOAllowPowerChange(ctx.conn.get(), message_arg) };
         }
-        K_IO_MESSAGE_SYSTEM_HAS_POWERED_ON => dispatch(PowerEvent::Resume, &CALLBACKS),
+        K_IO_MESSAGE_SYSTEM_HAS_POWERED_ON => dispatch(PowerEvent::Resume),
         _ => {}
     }
 }
@@ -121,16 +116,16 @@ extern "C" fn power_source_callback(refcon: *mut c_void) {
     let on_battery = current_on_battery();
     if on_battery != ctx.on_battery.swap(on_battery, Ordering::SeqCst) {
         let evt = if on_battery { PowerEvent::OnBattery } else { PowerEvent::OnAc };
-        dispatch(evt, &CALLBACKS);
+        dispatch(evt);
     }
 }
 
 extern "C" fn screen_locked_callback(_center: CFNotificationCenterRef, _observer: *const c_void, _name: CFStringRef, _object: *const c_void, _info: CFDictionaryRef) {
-    dispatch(PowerEvent::LockScreen, &CALLBACKS);
+    dispatch(PowerEvent::LockScreen);
 }
 
 extern "C" fn screen_unlocked_callback(_center: CFNotificationCenterRef, _observer: *const c_void, _name: CFStringRef, _object: *const c_void, _info: CFDictionaryRef) {
-    dispatch(PowerEvent::UnlockScreen, &CALLBACKS);
+    dispatch(PowerEvent::UnlockScreen);
 }
 
 /// Current snapshot: `true` = on battery (no source of type "AC Power",
@@ -153,7 +148,7 @@ fn current_on_battery() -> bool {
                 if desc.is_null() {
                     continue;
                 }
-                let ty = CFDictionaryGetValue(desc, type_key as *const c_void);
+                let ty = CFDictionaryGetValue(desc, type_key);
                 if !ty.is_null() && CFStringCompare(ty as CFStringRef, ac, 0) == 0 {
                     on_ac = true;
                 }
@@ -167,7 +162,9 @@ fn current_on_battery() -> bool {
     }
 }
 
-fn run_listener() {
+fn run_listener(ready: Ready) {
+    // TODO: report the IOKit registration outcome instead.
+    let _ = ready.send(Ok(()));
     let ctx = Box::new(Ctx {
         conn: Cell::new(0),
         on_battery: AtomicBool::new(current_on_battery()),
@@ -214,8 +211,8 @@ pub fn is_on_battery_power() -> bool {
     current_on_battery()
 }
 
-pub fn system_idle_time() -> u64 {
+pub fn system_idle_time() -> Option<u64> {
     // kCGEventSourceStateCombinedSessionState = 1, kCGAnyInputEventType = ~0
     let secs = unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) };
-    if secs < 0.0 { 0 } else { secs as u64 }
+    if secs >= 0.0 { Some(secs as u64) } else { None }
 }

@@ -10,7 +10,6 @@
 //! - Idle : GetLastInputInfo
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -27,32 +26,29 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSEXW, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
 
-use crate::platform::{dispatch, Callbacks};
-use crate::{Error, PowerEvent};
+use crate::platform::{Callback, Ready, dispatch, register, start_once};
+use crate::{Error, Options, PowerEvent};
 
-static CALLBACKS: Callbacks = std::sync::Mutex::new(Vec::new());
 static STARTED: AtomicBool = AtomicBool::new(false);
 static ON_BATTERY: AtomicBool = AtomicBool::new(false);
 
-pub fn listen(cb: Box<dyn Fn(PowerEvent) + Send>) -> Result<(), Error> {
-    CALLBACKS.lock().unwrap().push(cb);
-    if !STARTED.swap(true, Ordering::SeqCst) {
-        thread::spawn(run_listener);
-    }
-    Ok(())
+/// `opts` has no effect on Windows.
+pub fn listen(_opts: Options, cb: Callback) -> Result<(), Error> {
+    register(cb);
+    start_once(&STARTED, run_listener)
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_POWERBROADCAST => {
             match wparam.0 as u32 {
-                PBT_APMSUSPEND => dispatch(PowerEvent::Suspend, &CALLBACKS),
-                PBT_APMRESUMESUSPEND => dispatch(PowerEvent::Resume, &CALLBACKS),
+                PBT_APMSUSPEND => dispatch(PowerEvent::Suspend),
+                PBT_APMRESUMESUSPEND => dispatch(PowerEvent::Resume),
                 PBT_APMPOWERSTATUSCHANGE => {
                     let on_battery = is_on_battery_power();
                     if on_battery != ON_BATTERY.swap(on_battery, Ordering::SeqCst) {
                         let evt = if on_battery { PowerEvent::OnBattery } else { PowerEvent::OnAc };
-                        dispatch(evt, &CALLBACKS);
+                        dispatch(evt);
                     }
                 }
                 _ => {}
@@ -61,21 +57,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_WTSSESSION_CHANGE => {
             match wparam.0 as u32 {
-                WTS_SESSION_LOCK => dispatch(PowerEvent::LockScreen, &CALLBACKS),
-                WTS_SESSION_UNLOCK => dispatch(PowerEvent::UnlockScreen, &CALLBACKS),
+                WTS_SESSION_LOCK => dispatch(PowerEvent::LockScreen),
+                WTS_SESSION_UNLOCK => dispatch(PowerEvent::UnlockScreen),
                 _ => {}
             }
             LRESULT(0)
         }
         WM_QUERYENDSESSION => {
-            dispatch(PowerEvent::Shutdown, &CALLBACKS);
+            dispatch(PowerEvent::Shutdown);
             LRESULT(1) // allows the session to end
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-fn run_listener() {
+fn run_listener(ready: Ready) {
+    // TODO: report the window creation outcome instead.
+    let _ = ready.send(Ok(()));
     unsafe {
         let instance = HINSTANCE::default();
         let class = WNDCLASSEXW {
@@ -131,16 +129,16 @@ pub fn is_on_battery_power() -> bool {
     }
 }
 
-pub fn system_idle_time() -> u64 {
+pub fn system_idle_time() -> Option<u64> {
     let mut info = LASTINPUTINFO {
         cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
         dwTime: 0,
     };
     unsafe {
         if GetLastInputInfo(&mut info).as_bool() {
-            GetTickCount().wrapping_sub(info.dwTime) as u64 / 1000
+            Some(GetTickCount().wrapping_sub(info.dwTime) as u64 / 1000)
         } else {
-            0
+            None
         }
     }
 }

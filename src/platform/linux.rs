@@ -12,26 +12,21 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 
 use futures::executor::block_on;
 use futures::stream::{select_all, StreamExt};
 use zbus::zvariant::Value;
 use zbus::{Connection, MatchRule, MessageStream};
 
-use crate::platform::{dispatch, Callbacks};
-use crate::{Error, PowerEvent};
+use crate::platform::{Callback, Ready, dispatch, register, start_once};
+use crate::{Error, Options, PowerEvent};
 
-static CALLBACKS: Callbacks = std::sync::Mutex::new(Vec::new());
 static STARTED: AtomicBool = AtomicBool::new(false);
 static ON_BATTERY: AtomicBool = AtomicBool::new(false);
 
-pub fn listen(cb: Box<dyn Fn(PowerEvent) + Send>) -> Result<(), Error> {
-    CALLBACKS.lock().unwrap().push(cb);
-    if !STARTED.swap(true, Ordering::SeqCst) {
-        thread::spawn(run_listener);
-    }
-    Ok(())
+pub fn listen(_opts: Options, cb: Callback) -> Result<(), Error> {
+    register(cb);
+    start_once(&STARTED, run_listener)
 }
 
 fn match_rule(interface: &'static str, member: &'static str) -> MatchRule<'static> {
@@ -44,7 +39,9 @@ fn match_rule(interface: &'static str, member: &'static str) -> MatchRule<'stati
         .build()
 }
 
-fn run_listener() {
+fn run_listener(ready: Ready) {
+    // TODO: report the bus connection and subscription outcome instead.
+    let _ = ready.send(Ok(()));
     block_on(async {
         let conn = match Connection::system().await {
             Ok(c) => c,
@@ -79,7 +76,7 @@ fn run_listener() {
                 Some("PrepareForSleep") => {
                     if let Ok(sleeping) = msg.body().deserialize::<bool>() {
                         let evt = if sleeping { PowerEvent::Suspend } else { PowerEvent::Resume };
-                        dispatch(evt, &CALLBACKS);
+                        dispatch(evt);
                     }
                 }
                 Some("PropertiesChanged") => {
@@ -92,17 +89,17 @@ fn run_listener() {
                     if iface != "org.freedesktop.UPower" {
                         continue;
                     }
-                    if let Some(Value::Bool(on_battery)) = changed.get("OnBattery") {
-                        if *on_battery != ON_BATTERY.swap(*on_battery, Ordering::SeqCst) {
-                            let evt = if *on_battery { PowerEvent::OnBattery } else { PowerEvent::OnAc };
-                            dispatch(evt, &CALLBACKS);
-                        }
+                    if let Some(Value::Bool(on_battery)) = changed.get("OnBattery")
+                        && *on_battery != ON_BATTERY.swap(*on_battery, Ordering::SeqCst)
+                    {
+                        let evt = if *on_battery { PowerEvent::OnBattery } else { PowerEvent::OnAc };
+                        dispatch(evt);
                     }
                 }
                 Some("ActiveChanged") => {
                     if let Ok(locked) = msg.body().deserialize::<bool>() {
                         let evt = if locked { PowerEvent::LockScreen } else { PowerEvent::UnlockScreen };
-                        dispatch(evt, &CALLBACKS);
+                        dispatch(evt);
                     }
                 }
                 _ => {}
@@ -132,9 +129,9 @@ pub fn is_on_battery_power() -> bool {
     })
 }
 
-pub fn system_idle_time() -> u64 {
+pub fn system_idle_time() -> Option<u64> {
     block_on(async {
-        let Ok(conn) = Connection::system().await else { return 0 };
+        let Ok(conn) = Connection::system().await else { return None };
         // GNOME: milliseconds.
         if let Ok(proxy) = zbus::Proxy::new(
             &conn,
@@ -143,10 +140,9 @@ pub fn system_idle_time() -> u64 {
             "org.gnome.Mutter.IdleMonitor",
         )
         .await
+            && let Ok(ms) = proxy.call::<_, _, u64>("GetIdletime", &()).await
         {
-            if let Ok(ms) = proxy.call::<_, _, u64>("GetIdletime", &()).await {
-                return ms / 1000;
-            }
+            return Some(ms / 1000);
         }
         // KDE: seconds.
         if let Ok(proxy) = zbus::Proxy::new(
@@ -156,11 +152,10 @@ pub fn system_idle_time() -> u64 {
             "org.freedesktop.ScreenSaver",
         )
         .await
+            && let Ok(secs) = proxy.call::<_, _, u32>("GetSessionIdleTime", &()).await
         {
-            if let Ok(secs) = proxy.call::<_, _, u32>("GetSessionIdleTime", &()).await {
-                return secs as u64;
-            }
+            return Some(secs as u64);
         }
-        0
+        None
     })
 }

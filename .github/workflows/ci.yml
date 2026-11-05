@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # libtest never kills a hung test: bound deadlock regressions.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15-intel: x86_64 runner (macos-13 was retired in Dec 2025).
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install e2e dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus xvfb
+
+      - name: Enable strict e2e mode (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: echo "POWERMONITOR_E2E_STRICT=1" >> "$GITHUB_ENV"
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets
+
+      - name: Doc tests
+        run: cargo test --doc
+
+      - name: Docs
+        run: cargo doc --no-deps
